@@ -1,0 +1,533 @@
+import React, { useEffect, useMemo, useState } from "react";
+
+/**
+ * Gestor de Expedientes – Inmobiliaria Aguilar
+ * Single-file React app.
+ * - Captura de clientes (tipo de crédito + estado civil)
+ * - Generación automática de checklist por cliente según el tipo de crédito
+ * - Oculta requisitos "solo si es casado" para solteros
+ * - Guarda/recupera de localStorage
+ * - Progreso (%), filtro de pendientes, comentarios, enlaces-evidencia
+ * - Exportar/Importar JSON, Imprimir (PDF)
+ *
+ * Colores corporativos:
+ *  Azul Primario: #1A2D4E  | Texto: #333333 | Gris claro: #F5F5F5
+ */
+
+// ---------- Utilidades ----------
+const BRAND = {
+  primary: "#1A2D4E",
+  text: "#333333",
+  light: "#F5F5F5",
+};
+
+const CREDIT_TYPES = [
+  "INFONAVIT_TRADICIONAL",
+  "INFONAVIT_TOTAL",
+  "INFONAVIT_LINEA_III",
+  "COFINAVIT",
+  "PENSIONA2",
+  "FOVISSTE",
+  "FOVISSSTE_PARA_TODOS",
+  "BANCARIO",
+  "CONTADO",
+];
+
+// Requisito: { name, original, copy, onlyIfMarried }
+const COMMON_BASE = [
+  { name: "Propuesta de compra/venta firmada", original: true, copy: false },
+  { name: "Contrato firmado", original: true, copy: false },
+  { name: "Acta de nacimiento", original: true, copy: true },
+  { name: "Identificación oficial", original: false, copy: true },
+  { name: "CURP", original: false, copy: true },
+];
+
+const CONYUGAL = [
+  { name: "Acta de matrimonio", original: true, copy: true, onlyIfMarried: true },
+  { name: "Identificación del cónyuge", original: false, copy: true, onlyIfMarried: true },
+  { name: "CURP del cónyuge", original: false, copy: true, onlyIfMarried: true },
+  { name: "RFC del cónyuge", original: false, copy: true, onlyIfMarried: true },
+];
+
+const TEMPLATES = {
+  INFONAVIT_TRADICIONAL: [
+    ...COMMON_BASE,
+    { name: "Precalificación Mi Cuenta INFONAVIT", original: true },
+    { name: "Anexo C (portal INFONAVIT)", original: true },
+    { name: "Solicitud de avalúo INFONAVIT", original: true, copy: true },
+    ...CONYUGAL,
+  ],
+  INFONAVIT_TOTAL: [
+    ...COMMON_BASE,
+    { name: "Precalificación Mi Cuenta INFONAVIT", original: true },
+    { name: "Anexo C (portal INFONAVIT)", original: true },
+    ...CONYUGAL,
+  ],
+  INFONAVIT_LINEA_III: [
+    ...COMMON_BASE,
+    { name: "Precalificación Mi Cuenta INFONAVIT", original: true },
+    { name: "Solicitud de avalúo INFONAVIT", original: true, copy: true },
+    { name: "Cuestionario comprensión del crédito", original: true },
+    ...CONYUGAL,
+  ],
+  COFINAVIT: [
+    ...COMMON_BASE,
+    { name: "Autorización del banco", original: true },
+    { name: "Carta de instrucción irrevocable", original: true },
+    ...CONYUGAL,
+  ],
+  PENSIONA2: [
+    ...COMMON_BASE,
+    { name: "Talones de pago (última quincena)", original: true },
+    { name: "Credencial de pensionado", copy: true },
+    { name: "Concesión de pensión", copy: true },
+    ...CONYUGAL,
+  ],
+  FOVISSTE: [
+    ...COMMON_BASE,
+    { name: "Simulador de crédito FOVISSSTE", original: true },
+    { name: "Estado de cuenta SAR", copy: true },
+    { name: "Expediente electrónico único", copy: true },
+    ...CONYUGAL,
+  ],
+  FOVISSSTE_PARA_TODOS: [
+    ...COMMON_BASE,
+    { name: "Simulador crédito FOVISSSTE", original: true },
+    { name: "Autorización bancaria (original)", original: true },
+    { name: "Solicitud de crédito (banco)", original: true },
+    ...CONYUGAL,
+  ],
+  BANCARIO: [
+    ...COMMON_BASE,
+    { name: "Solicitud de crédito (banco)", original: true },
+    { name: "Autorización de crédito (banco)", original: true },
+    { name: "Estado de cuenta / ingresos", original: true },
+    ...CONYUGAL,
+  ],
+  CONTADO: [
+    ...COMMON_BASE,
+    { name: "Comprobantes de pago (dep/transfer)", original: true },
+    { name: "Anexo A / Aviso / Reglamento", original: true },
+    ...CONYUGAL,
+  ],
+};
+
+const uid = () => Math.random().toString(36).slice(2, 9);
+const today = () => new Date().toISOString().slice(0, 10);
+
+function buildTasks(creditType, isMarried) {
+  const src = TEMPLATES[creditType] || [];
+  return src
+    .filter((r) => (r.onlyIfMarried ? isMarried : true))
+    .map((r) => ({
+      id: uid(),
+      name: r.name,
+      original: !!r.original,
+      copy: !!r.copy,
+      onlyIfMarried: !!r.onlyIfMarried,
+      done: false,
+      comment: "",
+      link: "",
+      date: "",
+      uploadedBy: "",
+    }));
+}
+
+// ---------- Componentes ----------
+function Pill({ children, tone = "default" }) {
+  const tones = {
+    default: "bg-gray-100 text-gray-700",
+    primary: "bg-[#1A2D4E] text-white",
+    warning: "bg-yellow-100 text-yellow-800",
+    success: "bg-green-100 text-green-800",
+    danger: "bg-red-100 text-red-800",
+  };
+  return (
+    <span className={`px-2 py-1 rounded-full text-xs font-medium ${tones[tone]}`}>{children}</span>
+  );
+}
+
+function Progress({ value }) {
+  return (
+    <div className="w-full bg-gray-200 rounded-full h-2">
+      <div
+        className="h-2 rounded-full"
+        style={{ width: `${Math.round(value * 100)}%`, backgroundColor: BRAND.primary }}
+      />
+    </div>
+  );
+}
+
+function ToolbarButton({ children, onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      className="px-3 py-2 rounded-xl shadow-sm border text-sm hover:shadow md:whitespace-nowrap"
+      style={{ borderColor: "#e5e7eb", color: BRAND.text }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function AppHeader() {
+  return (
+    <div className="flex items-center justify-between p-4 border-b" style={{ borderColor: "#e5e7eb" }}>
+      <div className="flex items-center gap-3">
+        <div className="w-10 h-10 rounded-xl" style={{ background: BRAND.primary }} />
+        <div>
+          <h1 className="text-lg font-semibold" style={{ color: BRAND.text }}>Gestor de Expedientes</h1>
+          <p className="text-xs text-gray-500">Inmobiliaria Aguilar</p>
+        </div>
+      </div>
+      <div className="flex gap-2">
+        <ToolbarButton onClick={() => window.print()}>Imprimir / PDF</ToolbarButton>
+      </div>
+    </div>
+  );
+}
+
+function NewClientForm({ onCreate }) {
+  const [name, setName] = useState("");
+  const [clientId, setClientId] = useState("");
+  const [advisor, setAdvisor] = useState("");
+  const [creditType, setCreditType] = useState(CREDIT_TYPES[0]);
+  const [isMarried, setIsMarried] = useState(false);
+  const [comments, setComments] = useState("");
+
+  function handleSubmit(e) {
+    e.preventDefault();
+    if (!name || !clientId) return;
+    const client = {
+      id: uid(),
+      clientId,
+      name,
+      advisor,
+      creditType,
+      isMarried,
+      createdAt: today(),
+      comments,
+      tasks: buildTasks(creditType, isMarried),
+    };
+    onCreate(client);
+    // reset
+    setName(""); setClientId(""); setAdvisor(""); setComments("");
+    setCreditType(CREDIT_TYPES[0]); setIsMarried(false);
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-3">
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="text-xs text-gray-500">ID Cliente</label>
+          <input className="w-full border rounded-lg px-3 py-2" value={clientId} onChange={(e)=>setClientId(e.target.value)} />
+        </div>
+        <div>
+          <label className="text-xs text-gray-500">Nombre</label>
+          <input className="w-full border rounded-lg px-3 py-2" value={name} onChange={(e)=>setName(e.target.value)} />
+        </div>
+        <div>
+          <label className="text-xs text-gray-500">Tipo de crédito</label>
+          <select className="w-full border rounded-lg px-3 py-2" value={creditType} onChange={(e)=>setCreditType(e.target.value)}>
+            {CREDIT_TYPES.map(ct => <option key={ct} value={ct}>{ct}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="text-xs text-gray-500">¿Casado?</label>
+          <select className="w-full border rounded-lg px-3 py-2" value={isMarried?"Sí":"No"} onChange={(e)=>setIsMarried(e.target.value==="Sí")}>
+            <option>No</option>
+            <option>Sí</option>
+          </select>
+        </div>
+        <div>
+          <label className="text-xs text-gray-500">Asesor</label>
+          <input className="w-full border rounded-lg px-3 py-2" value={advisor} onChange={(e)=>setAdvisor(e.target.value)} />
+        </div>
+        <div>
+          <label className="text-xs text-gray-500">Comentarios</label>
+          <input className="w-full border rounded-lg px-3 py-2" value={comments} onChange={(e)=>setComments(e.target.value)} />
+        </div>
+      </div>
+      <button type="submit" className="w-full py-2 rounded-xl text-white" style={{ background: BRAND.primary }}>Agregar cliente</button>
+    </form>
+  );
+}
+
+function ClientList({ clients, selectedId, onSelect, onDelete }) {
+  return (
+    <div className="space-y-2">
+      {clients.length === 0 && <p className="text-sm text-gray-500">Sin clientes aún.</p>}
+      {clients.map((c) => (
+        <div key={c.id} className={`p-3 rounded-xl border flex items-center justify-between ${selectedId===c.id?"bg-gray-50":""}`} style={{ borderColor: "#e5e7eb" }}>
+          <div>
+            <div className="font-medium" style={{ color: BRAND.text }}>{c.name}</div>
+            <div className="text-xs text-gray-500">{c.clientId} · {c.creditType} · {c.isMarried?"Casado":"Soltero"}</div>
+          </div>
+          <div className="flex gap-2">
+            <ToolbarButton onClick={() => onSelect(c.id)}>Abrir</ToolbarButton>
+            <ToolbarButton onClick={() => onDelete(c.id)}>Eliminar</ToolbarButton>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function useLocalStorage(key, initialValue) {
+  const [value, setValue] = useState(() => {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : initialValue;
+    } catch (_) { return initialValue; }
+  });
+  useEffect(() => {
+    localStorage.setItem(key, JSON.stringify(value));
+  }, [key, value]);
+  return [value, setValue];
+}
+
+function Checklist({ client, onUpdateClient }) {
+  const [showPendingOnly, setShowPendingOnly] = useState(false);
+
+  const stats = useMemo(() => {
+    const total = client.tasks.length;
+    const done = client.tasks.filter(t => t.done).length;
+    const pct = total ? done/total : 0;
+    return { total, done, pct };
+  }, [client.tasks]);
+
+  function updateTask(taskId, patch) {
+    const tasks = client.tasks.map(t => t.id===taskId? { ...t, ...patch } : t);
+    onUpdateClient({ ...client, tasks });
+  }
+
+  function markAllDone() {
+    const now = today();
+    onUpdateClient({ ...client, tasks: client.tasks.map(t => ({...t, done:true, date: now})) });
+  }
+
+  const visible = showPendingOnly ? client.tasks.filter(t => !t.done) : client.tasks;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <h2 className="text-lg font-semibold" style={{ color: BRAND.text }}>Checklist</h2>
+            <Pill tone={stats.pct===1?"success":stats.pct>=0.5?"warning":"danger"}>{Math.round(stats.pct*100)}%</Pill>
+          </div>
+          <Progress value={stats.pct} />
+          <div className="text-xs text-gray-500">{stats.done} de {stats.total} documentos completos</div>
+        </div>
+        <div className="flex gap-2">
+          <ToolbarButton onClick={() => setShowPendingOnly(v=>!v)}>
+            {showPendingOnly?"Mostrar todos":"Ver solo pendientes"}
+          </ToolbarButton>
+          <ToolbarButton onClick={markAllDone}>Marcar todo como cumplido</ToolbarButton>
+        </div>
+      </div>
+
+      <div className="overflow-auto border rounded-xl" style={{ borderColor: "#e5e7eb" }}>
+        <table className="min-w-full text-sm">
+          <thead style={{ background: BRAND.light }}>
+            <tr className="text-left">
+              <th className="p-2">Documento</th>
+              <th className="p-2">Original</th>
+              <th className="p-2">Copia</th>
+              <th className="p-2">Cumplido</th>
+              <th className="p-2">Fecha</th>
+              <th className="p-2">Comentarios</th>
+              <th className="p-2">Enlace</th>
+              <th className="p-2">Subido por</th>
+            </tr>
+          </thead>
+          <tbody>
+            {visible.map((t) => (
+              <tr key={t.id} className="border-t" style={{ borderColor: "#e5e7eb" }}>
+                <td className="p-2">
+                  <div className="font-medium" style={{ color: BRAND.text }}>{t.name}</div>
+                  {t.onlyIfMarried && <div className="text-xs text-gray-500">(Solo si es casado)</div>}
+                </td>
+                <td className="p-2">{t.original?"Sí":"No"}</td>
+                <td className="p-2">{t.copy?"Sí":"No"}</td>
+                <td className="p-2">
+                  <input type="checkbox" checked={!!t.done} onChange={(e)=>updateTask(t.id,{ done: e.target.checked, date: e.target.checked? today(): "" })} />
+                </td>
+                <td className="p-2">
+                  <input type="date" className="border rounded px-2 py-1" value={t.date||""} onChange={(e)=>updateTask(t.id,{ date:e.target.value })} />
+                </td>
+                <td className="p-2">
+                  <input className="w-full border rounded px-2 py-1" value={t.comment} onChange={(e)=>updateTask(t.id,{ comment:e.target.value })} />
+                </td>
+                <td className="p-2">
+                  <input className="w-full border rounded px-2 py-1" placeholder="https://drive..." value={t.link} onChange={(e)=>updateTask(t.id,{ link:e.target.value })} />
+                </td>
+                <td className="p-2">
+                  <input className="w-full border rounded px-2 py-1" value={t.uploadedBy} onChange={(e)=>updateTask(t.id,{ uploadedBy:e.target.value })} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function ClientHeader({ client, onChangeCredit }) {
+  return (
+    <div className="p-3 rounded-xl bg-white shadow-sm border" style={{ borderColor: "#e5e7eb" }}>
+      <div className="flex flex-wrap items-center gap-3">
+        <Pill tone="primary">{client.creditType}</Pill>
+        <Pill>{client.isMarried?"Casado":"Soltero"}</Pill>
+        <Pill>{client.clientId}</Pill>
+        {client.advisor && <Pill>Asesor: {client.advisor}</Pill>}
+        <Pill>{client.createdAt}</Pill>
+        <div className="ml-auto flex gap-2 items-center">
+          <span className="text-xs text-gray-500">Cambiar tipo de crédito:</span>
+          <select className="border rounded-lg px-2 py-1" value={client.creditType} onChange={(e)=>onChangeCredit(e.target.value)}>
+            {CREDIT_TYPES.map(ct => <option key={ct} value={ct}>{ct}</option>)}
+          </select>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [clients, setClients] = useLocalStorage("aguilar_exp_clients_v1", []);
+  const [selectedId, setSelectedId] = useState(null);
+
+  function addClient(c) {
+    setClients((prev) => [c, ...prev]);
+    setSelectedId(c.id);
+  }
+
+  function deleteClient(id) {
+    setClients((prev) => prev.filter((c) => c.id !== id));
+    if (selectedId === id) setSelectedId(null);
+  }
+
+  function updateClient(updated) {
+    setClients((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
+  }
+
+  const selected = clients.find((c) => c.id === selectedId) || null;
+
+  function changeCreditType(newType) {
+    if (!selected) return;
+    if (newType === selected.creditType) return;
+    const isMarried = selected.isMarried;
+    const confirm = window.confirm(
+      `¿Cambiar tipo de crédito a ${newType}? Esto regenerará el checklist para este cliente.`
+    );
+    if (!confirm) return;
+    const tasks = buildTasks(newType, isMarried);
+    updateClient({ ...selected, creditType: newType, tasks });
+  }
+
+  function toggleMarried(value) {
+    if (!selected) return;
+    const confirm = window.confirm(
+      `¿Cambiar estado civil a ${value ? "Casado" : "Soltero"}? Se recalculará el checklist.`
+    );
+    if (!confirm) return;
+    const tasks = buildTasks(selected.creditType, value);
+    updateClient({ ...selected, isMarried: value, tasks });
+  }
+
+  function exportJSON() {
+    const data = JSON.stringify(clients, null, 2);
+    const blob = new Blob([data], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `expedientes_${Date.now()}.json`; a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function importJSON(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try { setClients(JSON.parse(reader.result)); }
+      catch { alert("Archivo inválido"); }
+    };
+    reader.readAsText(file);
+  }
+
+  // Pequeño tablero arriba de la lista
+  const board = useMemo(() => {
+    const totals = clients.map((c) => {
+      const total = c.tasks.length; const done = c.tasks.filter(t=>t.done).length; const pct = total? done/total : 0;
+      return { id: c.id, pct };
+    });
+    const green = totals.filter((t)=>t.pct===1).length;
+    const yellow = totals.filter((t)=>t.pct>=0.5 && t.pct<1).length;
+    const red = totals.filter((t)=>t.pct<0.5).length;
+    return { green, yellow, red };
+  }, [clients]);
+
+  return (
+    <div className="min-h-screen" style={{ background: "#ffffff" }}>
+      <style>{`@media print { .no-print { display: none !important; } }`}</style>
+      <AppHeader />
+
+      <div className="p-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+        {/* Columna izquierda: captura + lista */}
+        <div className="md:col-span-1 space-y-4">
+          <div className="p-4 rounded-2xl shadow-sm border no-print" style={{ borderColor: "#e5e7eb" }}>
+            <h2 className="text-base font-semibold mb-3" style={{ color: BRAND.text }}>Nuevo cliente</h2>
+            <NewClientForm onCreate={addClient} />
+          </div>
+
+          <div className="p-4 rounded-2xl shadow-sm border" style={{ borderColor: "#e5e7eb" }}>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-semibold" style={{ color: BRAND.text }}>Clientes</h3>
+              <div className="flex items-center gap-2 text-xs">
+                <span>🟢 {board.green}</span>
+                <span>🟡 {board.yellow}</span>
+                <span>🔴 {board.red}</span>
+              </div>
+            </div>
+            <ClientList clients={clients} selectedId={selectedId} onSelect={setSelectedId} onDelete={deleteClient} />
+
+            <div className="mt-4 flex items-center justify-between gap-2 no-print">
+              <ToolbarButton onClick={exportJSON}>Exportar JSON</ToolbarButton>
+              <label className="px-3 py-2 rounded-xl shadow-sm border text-sm cursor-pointer">Importar JSON
+                <input type="file" accept="application/json" className="hidden" onChange={importJSON} />
+              </label>
+            </div>
+          </div>
+        </div>
+
+        {/* Columna derecha: detalle */}
+        <div className="md:col-span-2 space-y-4">
+          {!selected && (
+            <div className="p-6 rounded-2xl border text-sm text-gray-500" style={{ borderColor: "#e5e7eb" }}>
+              Selecciona un cliente para ver/editar su checklist.
+            </div>
+          )}
+
+          {selected && (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-3">
+                <h2 className="text-xl font-semibold" style={{ color: BRAND.text }}>{selected.name}</h2>
+                <Pill>{selected.clientId}</Pill>
+                <Pill tone={selected.isMarried?"primary":"default"}>{selected.isMarried?"Casado":"Soltero"}</Pill>
+                <div className="ml-auto flex gap-2 items-center no-print">
+                  <ToolbarButton onClick={() => toggleMarried(!selected.isMarried)}>
+                    Cambiar a {selected.isMarried?"Soltero":"Casado"}
+                  </ToolbarButton>
+                </div>
+              </div>
+
+              <ClientHeader client={selected} onChangeCredit={changeCreditType} />
+              <Checklist client={selected} onUpdateClient={updateClient} />
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
